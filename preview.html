@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>爱心便签 · 张默璇</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#000; }
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "微软雅黑", sans-serif;
+    background-position:center; background-size:cover; background-repeat:no-repeat;
+  }
+  /* 背景压暗层，让便签/文字更清楚（BG_DIM 控制，0 = 不压暗） */
+  #dim { position:fixed; inset:0; background:#000; pointer-events:none; z-index:0; }
+
+  /* ---------- 特效层：降落红心 + ✨粒子 ---------- */
+  #fx { position:fixed; inset:0; overflow:hidden; pointer-events:none; z-index:1; }
+  @keyframes fall {
+    from { transform: translateY(-60px) rotate(0deg); }
+    to   { transform: translateY(105vh) rotate(360deg); }
+  }
+  @keyframes drift {
+    0%   { transform: translate(0,-60px) scale(.5); opacity:0; }
+    12%  { opacity:1; }
+    88%  { opacity:1; }
+    100% { transform: translate(var(--dx), 105vh) scale(1.15); opacity:0; }
+  }
+  .fall-heart { position:absolute; top:0; animation: fall linear infinite; will-change:transform; }
+  .spark      { position:absolute; top:0; animation: drift linear infinite; will-change:transform,opacity; }
+
+  /* ---------- 心形便签 ---------- */
+  #stage { position:fixed; inset:0; z-index:3; }
+  .note {
+    position:absolute; left:0; top:0; visibility:hidden;
+    font-size:12px; font-weight:700; color:#333333;
+    padding:5px 8px; border:0; white-space:nowrap;
+  }
+
+  /* ---------- 心形中间的文字 ---------- */
+  #center {
+    position:fixed; left:50%; top:50%; z-index:2;
+    transform:translate(-50%,-50%);
+    font-size:clamp(34px, 7.5vw, 96px); font-weight:800;
+    letter-spacing:.06em; white-space:nowrap; pointer-events:none;
+    color:#fff; opacity:0; transition:opacity .6s ease;
+    text-shadow:0 0 22px rgba(255,60,110,.95), 0 0 60px rgba(255,60,110,.55),
+                0 2px 12px rgba(0,0,0,.65);
+    animation: glow 2.6s ease-in-out infinite;
+  }
+  #center.on { opacity:1; }
+  @keyframes glow { 0%,100% { filter:brightness(1); } 50% { filter:brightness(1.35); } }
+
+  /* ---------- 左上角信息 / 控件 ---------- */
+  #hud {
+    position:fixed; left:12px; top:10px; z-index:10; user-select:none;
+    font-size:12px; line-height:1.9; color:#9aa0a6;
+    background:rgba(0,0,0,.55); padding:8px 12px; border-radius:6px;
+  }
+  #hud b { color:#e8eaed; font-weight:600; }
+  #hud button, #hud label {
+    display:inline-block; font:inherit; color:#e8eaed; background:rgba(255,255,255,.14);
+    border:0; border-radius:4px; padding:3px 10px; margin:5px 6px 0 0; cursor:pointer;
+  }
+  #hud button:hover, #hud label:hover { background:rgba(255,255,255,.26); }
+</style>
+</head>
+<body>
+  <div id="dim"></div>
+  <div id="fx"></div>
+  <div id="center">张默璇</div>
+  <div id="stage"></div>
+  <div id="hud">
+    <div id="stats"></div>
+    <button id="replay">重播</button><label>选背景图<input id="bgfile" type="file" accept="image/*" hidden></label><button id="export">导出单文件</button>
+  </div>
+
+<script>
+'use strict';
+
+/* ==================== 可调参数 ==================== */
+const BG_IMAGE = "";            // 也可直接填图片路径；用下面的「选背景图」按钮则不用管这里
+const BG_DIM   = 0.20;          // 背景压暗程度 0~1
+const NAME     = "张默璇";       // 心形中间的文字
+
+const COUNT = 150;              // 便签数量
+const DELAY = 8;                // 每个便签浮现 / 散开的间隔（毫秒）
+const HOLD  = 1200;             // 心形停留多久再散开（毫秒）
+
+const TEXTS  = ["多喝热水~", "好好爱自己", "好好吃饭", "保持好心情",
+                "我想你了", "顺顺利利", "别熬夜", "天冷了多穿衣服"];
+const COLORS = ["#ffb7c5", "#bae1ff", "#c8f7c5", "#fffacd", "#ff8fab", "#87ceeb"];
+
+const FALL_HEARTS  = ["❤️", "💗"];            // 从上而下降落的心（🤍 是白色的，要红色用 ❤️）
+const SPARKS       = ["✨", "✧", "⋆", "·"];   // 粒子
+const SPARK_COLORS = ["#fff6c9", "#ffe066", "#cfe9ff", "#ffd1e0"];
+const FALL_COUNT   = 12;
+const SPARK_COUNT  = 18;
+
+const IMG_MAX_W   = 1920;       // 导出前把照片压到最大宽度（像素）
+const IMG_QUALITY = 0.82;       // 导出时的 JPEG 质量
+/* ================================================= */
+
+function heartPoint(t) {
+  const x = 16 * Math.pow(Math.sin(t), 3);
+  const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+  return [x, -y];                       // 屏幕 y 轴向下，取负
+}
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const pick  = a => a[(Math.random() * a.length) | 0];
+const rnd   = (a, b) => a + Math.random() * (b - a);
+
+const stage   = document.getElementById('stage');
+const fx      = document.getElementById('fx');
+const statsEl = document.getElementById('stats');
+const center  = document.getElementById('center');
+const hudEl   = document.getElementById('hud');
+
+let notes = [], targets = [], gen = 0;
+let bgDataUrl = BG_IMAGE.indexOf('data:') === 0 ? BG_IMAGE : '';
+
+center.textContent = NAME;
+document.getElementById('dim').style.opacity = BG_DIM;
+if (BG_IMAGE) document.body.style.backgroundImage = `url("${BG_IMAGE}")`;
+
+/* ---------- 降落红心 + ✨粒子（持续循环） ---------- */
+function spawnFx() {
+  for (let i = 0; i < FALL_COUNT; i++) {
+    const s = document.createElement('span');
+    s.className = 'fall-heart';
+    s.textContent = pick(FALL_HEARTS);
+    s.style.left = rnd(0, 100).toFixed(2) + '%';
+    s.style.fontSize = rnd(11, 21).toFixed(1) + 'px';
+    s.style.opacity = rnd(0.45, 1).toFixed(2);
+    s.style.animationDuration = rnd(7, 14).toFixed(2) + 's';
+    s.style.animationDelay = (-rnd(0, 14)).toFixed(2) + 's';   // 负延迟：一打开就已在半空中
+    fx.appendChild(s);
+  }
+  for (let i = 0; i < SPARK_COUNT; i++) {
+    const s = document.createElement('span');
+    s.className = 'spark';
+    s.textContent = pick(SPARKS);
+    s.style.left = rnd(0, 100).toFixed(2) + '%';
+    s.style.fontSize = rnd(9, 20).toFixed(1) + 'px';
+    s.style.color = pick(SPARK_COLORS);
+    s.style.setProperty('--dx', rnd(-70, 70).toFixed(0) + 'px');
+    s.style.animationDuration = rnd(6, 14).toFixed(2) + 's';
+    s.style.animationDelay = (-rnd(0, 14)).toFixed(2) + 's';
+    fx.appendChild(s);
+  }
+}
+
+/* ---------- 造便签 + 算心形落点 ---------- */
+function build() {
+  stage.innerHTML = '';
+  notes = []; targets = [];
+  center.classList.remove('on');
+
+  const W = window.innerWidth, H = window.innerHeight;
+
+  for (let i = 0; i < COUNT; i++) {
+    const el = document.createElement('div');
+    el.className = 'note';
+    el.textContent = pick(TEXTS);
+    el.style.background = pick(COLORS);
+    el.style.visibility = 'hidden';
+    stage.appendChild(el);
+    notes.push(el);
+  }
+
+  const pts = [];
+  for (let i = 0; i < COUNT; i++) pts.push(heartPoint(i / COUNT * 2 * Math.PI));
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const scale = Math.min(W * 0.62 / (maxX - minX), H * 0.72 / (maxY - minY));
+  const cx = W / 2 - (maxX + minX) / 2 * scale;
+  const cy = H / 2 - (maxY + minY) / 2 * scale;
+
+  let sumW = 0;
+  notes.forEach((el, i) => {
+    const nw = el.offsetWidth, nh = el.offsetHeight;
+    sumW += nw;
+    targets.push([clamp(cx + pts[i][0] * scale - nw / 2, 0, W - nw),
+                  clamp(cy + pts[i][1] * scale - nh / 2, 0, H - nh)]);
+  });
+
+  const gaps = [];
+  for (let i = 0; i < COUNT; i++) {
+    const a = targets[i], b = targets[(i + 1) % COUNT];
+    gaps.push(Math.hypot(b[0] - a[0], b[1] - a[1]));
+  }
+  gaps.sort((p, q) => p - q);
+  const midGap = gaps[gaps.length >> 1] || 1;
+
+  statsEl.innerHTML =
+    `便签 <b>${COUNT}</b> 张 · 心形 <b>${Math.round((maxX - minX) * scale)}×${Math.round((maxY - minY) * scale)}px</b>` +
+    ` · 相邻间距中位 <b>${Math.round(midGap)}px</b> · 横向重叠 <b>${(sumW / COUNT / midGap).toFixed(1)}</b> 层`;
+}
+
+/* ---------- 第一幕：逐个浮现拼成心形 ---------- */
+function assemble(i, g) {
+  if (g !== gen) return;
+  if (i >= COUNT) {
+    center.classList.add('on');                    // 心形拼好 → 中间的文字浮现
+    setTimeout(() => scatter(0, g), HOLD);
+    return;
+  }
+  const el = notes[i];
+  el.style.left = targets[i][0] + 'px';
+  el.style.top  = targets[i][1] + 'px';
+  el.style.visibility = 'visible';
+  setTimeout(() => assemble(i + 1, g), DELAY);
+}
+
+/* ---------- 第二幕：随机散开铺满全屏 ---------- */
+function scatter(i, g) {
+  if (g !== gen) return;
+  if (i === 0) center.classList.remove('on');
+  if (i >= COUNT) return;
+  const el = notes[i];
+  el.style.left = Math.round(rnd(0, Math.max(0, window.innerWidth  - el.offsetWidth)))  + 'px';
+  el.style.top  = Math.round(rnd(0, Math.max(0, window.innerHeight - el.offsetHeight))) + 'px';
+  setTimeout(() => scatter(i + 1, g), DELAY);
+}
+
+function play() {
+  const g = ++gen;
+  build();
+  setTimeout(() => assemble(0, g), 300);
+}
+
+/* ---------- 选背景图：本地压缩后转成内嵌数据 ---------- */
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, IMG_MAX_W / img.width);
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(cv.toDataURL('image/jpeg', IMG_QUALITY));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('read-failed')); };
+    img.src = url;
+  });
+}
+
+document.getElementById('bgfile').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    bgDataUrl = await shrinkImage(f);
+    document.body.style.backgroundImage = `url("${bgDataUrl}")`;
+  } catch (err) {
+    alert('这张图片浏览器读不了（iPhone 拍的 HEIC 格式最常见）。请先转成 JPG 或 PNG 再选一次。');
+  }
+});
+
+/* ---------- 导出单文件：图片内嵌，不依赖任何外部文件 ---------- */
+document.getElementById('export').addEventListener('click', () => {
+  if (!bgDataUrl) { alert('请先点「选背景图」选一张照片，再导出。'); return; }
+
+  // 清掉运行时产生的内容，让导出的 HTML 回到干净状态
+  stage.innerHTML = '';
+  fx.innerHTML = '';
+  statsEl.innerHTML = '';
+  center.classList.remove('on');
+
+  // 把图片写进 body 的内联样式，导出文件自带背景
+  document.body.style.backgroundImage = `url("${bgDataUrl}")`;
+  const hudWas = hudEl.style.display;
+  hudEl.style.display = 'none';          // 导出的成品不带左上角那排控件（想保留就删掉这两行）
+  const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  hudEl.style.display = hudWas;
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'index.html';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+
+  play();   // 恢复画面上的动画
+});
+
+/* ---------- 其它交互 ---------- */
+document.getElementById('replay').addEventListener('click', play);
+document.addEventListener('click', e => { if (!e.target.closest('#hud')) play(); });
+window.addEventListener('resize', play);
+document.addEventListener('keydown', e => {
+  if (e.key === 'h' || e.key === 'H') hudEl.style.display = hudEl.style.display === 'none' ? '' : 'none';
+});
+
+spawnFx();
+play();
+</script>
+</body>
+</html>
